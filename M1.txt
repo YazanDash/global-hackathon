@@ -1,0 +1,396 @@
+You are creating a new Python project called BudgetDev from scratch in this empty directory.
+
+BudgetDev is a token-efficient coding agent for an AI hackathon. Its problem statement is:
+"Build a coding agent that gets the job done with the fewest tokens."
+
+Important distinction:
+- This repository is the BudgetDev agent project.
+- The coding agent built by this project will later operate on a separate target workspace passed through --workspace.
+- It must not modify BudgetDev's own source files during normal operation.
+- File tools must resolve paths relative to the target workspace and reject path traversal.
+
+Your task:
+1. Initialize this folder as a Git repository.
+2. Create README.md documenting the project vision, architecture, milestones, and usage.
+3. Implement ONLY Milestone 1 now.
+4. Do not implement the Repo Atlas, semantic search, embeddings, model routing, dashboard, or incremental re-indexing yet.
+
+## Product vision for README.md
+
+BudgetDev will eventually:
+- Receive a bug report or feature request.
+- Plan before reading code.
+- Search a prebuilt semantic index of the repository, called the Repo Atlas.
+- Read only the smallest relevant code windows.
+- Apply minimal patches.
+- Run targeted tests.
+- Track every token spent.
+- Route cheap work to a cheap model and difficult coding work to a stronger model through Bifrost.
+
+For Milestone 1, build only the baseline agent. This baseline is important because later milestones must prove that the Repo Atlas and budget controller reduce token usage compared with it.
+
+## Milestone 1 requirements
+
+Use:
+- Python 3.11+
+- Typer for the CLI
+- Pydantic for configuration and schemas
+- python-dotenv
+- openai Python SDK, configured with Bifrost's OpenAI-compatible base URL
+- SQLite for the token ledger
+- pytest and pytest-mock
+
+Do NOT use LangChain, LlamaIndex, AutoGen, CrewAI, or any agent framework.
+
+Create this structure:
+
+.
+├── README.md
+├── pyproject.toml
+├── .env.example
+├── .gitignore
+├── budgetdev/
+│   ├── __init__.py
+│   ├── cli.py
+│   ├── config.py
+│   ├── llm.py
+│   ├── agent.py
+│   ├── ledger.py
+│   └── tools/
+│       ├── __init__.py
+│       ├── base.py
+│       ├── files.py
+│       └── tests.py
+└── tests/
+    ├── __init__.py
+    ├── conftest.py
+    ├── test_agent.py
+    ├── test_files.py
+    ├── test_ledger.py
+    └── test_tests.py
+
+## Environment variables
+
+Create .env.example:
+
+BIFROST_BASE_URL=https://api.example-bifrost-endpoint.com/v1
+BIFROST_API_KEY=your_api_key
+BUDGETDEV_CHEAP_MODEL=cheap-model-name
+BUDGETDEV_CODER_MODEL=coder-model-name
+BUDGETDEV_MAX_TOKENS=30000
+BUDGETDEV_MAX_STEPS=15
+BUDGETDEV_LEDGER_PATH=budgetdev_ledger.sqlite3
+
+Create .gitignore with at least:
+
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.sqlite3
+*.db
+dist/
+build/
+
+## Config
+
+In budgetdev/config.py:
+- Create a Pydantic Settings class.
+- Load all environment variables above.
+- Validate required values.
+- Use sensible defaults for max_tokens, max_steps, and ledger_path.
+
+## Bifrost client
+
+In budgetdev/llm.py:
+- Create BifrostClient using the openai SDK with base_url from BIFROST_BASE_URL.
+- Provide:
+
+def chat(self, messages, model, tools=None) -> LLMResponse
+
+- LLMResponse must include:
+  - content
+  - tool_calls
+  - prompt_tokens
+  - completion_tokens
+  - total_tokens
+  - raw_model
+
+- Parse OpenAI-style tool calls.
+- Parse token usage from response.usage.
+- If usage is missing, use zero rather than crashing.
+- Wrap API errors in a custom LLMError.
+- Do not hard-code API keys or model names.
+
+## Token ledger
+
+In budgetdev/ledger.py:
+- Use SQLite.
+- Automatically create tables.
+- Record every LLM call in llm_calls:
+  - id, created_at, model, action, prompt_tokens, completion_tokens, total_tokens, success, error, metadata_json
+
+- Record every tool execution in tool_calls:
+  - id, created_at, tool_name, arguments_json, success, result_summary, error, duration_ms
+
+- Provide:
+  - log_llm_call
+  - log_tool_call
+  - total_tokens
+  - calls_by_tool
+  - summary
+
+- summary must return total_tokens, llm_calls, tool_calls, tokens_by_model, and calls_by_tool.
+- Use parameterized SQL.
+- Append data across runs; do not overwrite the database.
+
+## Tool registry
+
+In budgetdev/tools/base.py:
+- Create Tool, ToolResult, and ToolRegistry.
+- Tool has name, description, parameters, and handler.
+- ToolResult has success, output, error, and metadata.
+- ToolRegistry must:
+  - register tools
+  - get tools
+  - convert tools to OpenAI-compatible tool definitions
+  - execute a tool by name
+  - catch exceptions and return failed ToolResult objects instead of crashing
+
+## File tools
+
+In budgetdev/tools/files.py, implement:
+
+1. list_files(root=".")
+- List relative file paths.
+- Ignore .git, __pycache__, .venv, venv, node_modules, .pytest_cache, and compiled Python files.
+- Limit output to 200 files.
+
+2. grep(pattern, root=".")
+- Search text files recursively.
+- Return matches as path:line: matching line.
+- Limit to 50 matches.
+
+3. read_file(path)
+- Read a UTF-8 text file.
+- If it has more than 400 lines, return only the first 400 lines and tell the agent to use read_lines.
+
+4. read_lines(path, start, end)
+- Return the requested 1-based inclusive line range.
+- Include at most 10 lines of context before and after.
+- Format output as:
+  path:start-end
+  42: def example():
+  43:     ...
+
+5. write_patch(diff)
+- Accept a unified diff.
+- Apply it safely to the target workspace.
+- Prefer `git apply --whitespace=nowarn` through subprocess when the workspace is a Git repository.
+- If Git is unavailable, implement a minimal safe fallback for simple unified diffs.
+- Reject diffs that write outside the workspace.
+- Never use eval, exec, or unsafe shell interpolation.
+
+Security rules:
+- All paths must resolve inside the target workspace.
+- Reject ../ traversal and absolute paths outside the workspace.
+- Handle symlinks safely.
+
+## Test tool
+
+In budgetdev/tools/tests.py:
+
+def run_tests(test_filter=None, cwd=".") -> str
+
+- Run pytest through subprocess.
+- If test_filter is provided, run: pytest <filter> -q
+- Otherwise run: pytest -q
+- Use a 120-second timeout.
+- Return compressed output only.
+- Format:
+
+Tests: X passed, Y failed.
+Failed tests:
+- test_name
+
+First relevant errors:
+- test_name: first meaningful error line
+
+- Never return the full pytest log.
+- Limit to 10 failed tests and 10 error lines.
+- Strip ANSI color codes.
+
+## Agent
+
+In budgetdev/agent.py:
+- Create CodingAgent.
+- Constructor takes client, registry, ledger, and settings.
+- Implement:
+
+def run(self, issue, max_tokens=None) -> AgentResult
+
+- AgentResult must include success, final_message, patch, total_tokens, steps_used, and stopped_reason.
+- Implement a ReAct-style loop:
+  1. Send the system prompt and issue to the model.
+  2. If the model returns a tool call, execute it.
+  3. Log the LLM call and tool execution.
+  4. Compress the tool result.
+  5. Append the result to the conversation.
+  6. Repeat.
+  7. If the model calls finish, return the final patch and explanation.
+  8. Stop after max_steps or when the token budget is exceeded.
+
+Use this system prompt:
+
+You are BudgetDev, a token-efficient coding agent.
+
+Your goal is to resolve the user's software issue with the fewest tokens possible while producing a correct, test-passing change.
+
+Rules:
+1. Think before acting, but keep your reasoning short.
+2. Use list_files or grep only when necessary.
+3. Prefer read_lines over read_file.
+4. Read only the smallest relevant code range.
+5. Make the smallest change that correctly resolves the issue.
+6. Run only relevant tests when possible.
+7. If tests fail, read the compressed failure output and make one focused correction.
+8. Do not rewrite entire files.
+9. Do not add unrelated features, comments, refactors, or documentation.
+10. When the change is complete and tests pass, call finish.
+
+Available tools:
+- list_files
+- grep
+- read_file
+- read_lines
+- write_patch
+- run_tests
+- finish
+
+The finish tool accepts:
+- explanation: short explanation of the change
+- patch: final unified diff
+
+finish must not perform any side effect.
+
+## CLI
+
+In budgetdev/cli.py, use Typer and implement:
+
+1. budgetdev run
+- Required: --issue
+- Optional: --workspace, default current directory
+- Optional: --max-tokens
+- Optional: --model
+- Run the agent against the target workspace.
+- Print a final receipt:
+
+BudgetDev run complete
+Success: true/false
+Steps used: N
+Total tokens: N
+LLM calls: N
+Tool calls: N
+Stopped reason: ...
+
+- If successful, print the final patch.
+
+2. budgetdev report
+- Print the ledger summary.
+
+3. budgetdev test
+- Optional: --filter
+- Run the compressed test tool and print its result.
+
+## Tests
+
+Use pytest and tmp_path.
+
+In tests/conftest.py, create:
+- A temporary target workspace with:
+
+app.py:
+def add(a, b):
+    return a - b
+
+tests/test_app.py:
+from app import add
+
+def test_add():
+    assert add(2, 3) == 5
+
+- A mocked BifrostClient.
+- A temporary SQLite ledger.
+- A tool registry.
+
+Write tests for:
+- list_files ignoring ignored directories
+- grep finding a known pattern
+- read_file truncation
+- read_lines returning only requested lines plus limited context
+- invalid read_lines ranges
+- path traversal rejection
+- write_patch applying a valid diff that changes `return a - b` to `return a + b`
+- compressed passing and failing test output
+- ANSI stripping
+- ledger recording LLM and tool calls
+- token totals
+- agent executing tools in order
+- agent stopping on finish
+- agent stopping at max_steps
+- agent stopping when token budget is exceeded
+
+Mock the LLM in all agent tests. Do not call Bifrost during pytest.
+
+## pyproject.toml
+
+Create a valid pyproject.toml with:
+- name: budgetdev
+- requires-python: >=3.11
+- console script:
+
+[project.scripts]
+budgetdev = "budgetdev.cli:app"
+
+- dependencies: typer, pydantic, python-dotenv, openai
+- dev dependencies: pytest, pytest-mock
+
+## Final verification
+
+After implementation:
+1. Run `pytest -q`.
+2. Fix every failure.
+3. Run `budgetdev --help`.
+4. Ensure `run`, `report`, and `test` commands exist.
+5. Run `budgetdev report` and ensure it works with an empty ledger.
+6. Ensure there are no hard-coded API keys, TODO-only files, placeholder modules, or agent-framework imports.
+
+## Definition of done
+
+Milestone 1 is complete only when:
+- The exact structure exists.
+- `pytest -q` passes.
+- The CLI has run, report, and test commands.
+- The agent can call tools in a loop.
+- The agent can apply a unified diff.
+- The agent can run tests and receive compressed output.
+- Every LLM and tool call is recorded in SQLite.
+- Token usage is tracked.
+- Path traversal is prevented.
+- Test output is compressed.
+- No real LLM call occurs during unit tests.
+
+When done, report:
+1. Files created
+2. Install and run commands
+3. How the agent flow works
+4. Assumptions made
+5. Test results
+
+Important distinction:
+
+- This repository is the BudgetDev agent project.
+- The agent being built must operate on a separate target workspace supplied through the CLI --workspace option.
+- All file tools must resolve paths relative to that target workspace.
+- The agent must not modify BudgetDev's own source files during normal operation.
+- Unit tests must use temporary target workspaces created with pytest's tmp_path fixture.
