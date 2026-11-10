@@ -55,6 +55,8 @@ def run(issue: str = typer.Option(...), workspace: Path = typer.Option(Path(".")
     typer.echo(f"LLM calls: {summary['llm_calls']}")
     typer.echo(f"Tool calls: {summary['tool_calls']}")
     typer.echo(f"Stopped reason: {result.stopped_reason}")
+    if result.final_message:
+        typer.echo(f"Message: {result.final_message}")
     if result.patch:
         typer.echo(result.patch)
 

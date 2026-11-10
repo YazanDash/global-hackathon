@@ -36,7 +36,7 @@ class CodingAgent:
         self.client, self.registry, self.ledger, self.settings = client, registry, ledger, settings
 
     def run(self, issue, max_tokens=None) -> AgentResult:
-        budget = max_tokens or self.settings.max_tokens
+        budget = self.settings.max_tokens if max_tokens is None else max_tokens
         messages = [{"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": issue}]
         total = 0
@@ -68,7 +68,8 @@ class CodingAgent:
                 result = self.registry.execute(name, args)
                 self.ledger.log_tool_call(name, args, result.success, result.output,
                                           result.error, (time.monotonic() - started) * 1000)
-                messages.append({"role": "assistant", "tool_calls": [call]})
+                messages.append({"role": "assistant", "content": None,
+                                 "tool_calls": [_assistant_tool_call(call)]})
                 messages.append({"role": "tool", "tool_call_id": call.get("id", name),
                                  "content": _compress(result.output if result.success else result.error or "")})
         return AgentResult(False, "", "", total, self.settings.max_steps, "max steps exceeded")
@@ -85,3 +86,17 @@ class CodingAgent:
 
 def _compress(value: str) -> str:
     return value if len(value) <= 12_000 else value[:12_000] + "\n[output compressed]"
+
+
+def _assistant_tool_call(call: dict[str, Any]) -> dict[str, Any]:
+    arguments = call.get("arguments", {})
+    if not isinstance(arguments, str):
+        arguments = json.dumps(arguments)
+    return {
+        "id": call.get("id", ""),
+        "type": "function",
+        "function": {
+            "name": call.get("name", ""),
+            "arguments": arguments,
+        },
+    }

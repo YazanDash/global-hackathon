@@ -22,7 +22,11 @@ class BifrostClient:
             from openai import OpenAI
         except ImportError as exc:
             raise LLMError("The openai package is required to use BifrostClient") from exc
-        self._client = OpenAI(base_url=base_url, api_key=api_key)
+        self._client = OpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            default_headers={"x-bf-vk": api_key},
+        )
 
     def chat(self, messages, model, tools=None) -> LLMResponse:
         try:

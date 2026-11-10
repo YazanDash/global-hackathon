@@ -20,7 +20,9 @@ def run_tests(test_filter=None, cwd=".") -> str:
     for line in output.splitlines():
         if line.startswith(("E ", "ERROR")) and line.strip() not in errors:
             errors.append(line.strip())
-    report = f"Tests: {int(passed.group(1)) if passed else 0} passed, {int(failed.group(1)) if failed else 0} failed."
+    passed_count = int(passed.group(1)) if passed else 0
+    failed_count = int(failed.group(1)) if failed else (1 if errors else 0)
+    report = f"Tests: {passed_count} passed, {failed_count} failed."
     if failed_names:
         report += "\nFailed tests:\n" + "\n".join(f"- {name}" for name in failed_names)
     if errors:
