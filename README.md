@@ -1,97 +1,70 @@
 # BudgetDev — Token-Efficient Coding Agent
 
-BudgetDev is a coding agent designed to complete software tasks using the **fewest tokens possible without sacrificing correctness**.
-
-Instead of letting the LLM browse an entire repository, it first builds a one-time **semantic code index** (the *Repo Atlas*), then retrieves only the smallest relevant code windows needed to solve the task.
-
-## Core Idea
+BudgetDev is a coding agent that fixes software issues using the **fewest tokens possible without sacrificing correctness**. It builds a one-time semantic index of a repository (the *Repo Atlas*), then retrieves only the small code windows a task needs, instead of letting the LLM browse the repo.
 
 > **Pay once to understand the repository. Retrieve by meaning. Read only what matters. Spend tokens only where they improve the chance of a correct, test-passing patch.**
 
-## High-Level Process
+## The Problem
 
-```mermaid
-flowchart TD
-    A[User Issue / Feature Request] --> B[Budget Controller]
+Coding agents are expensive, and most of the cost is waste, not reasoning:
 
-    B --> C[Cheap Planner Model]
-    C --> D[Create Minimal Evidence Checklist]
+- They **explore blindly**: grep, open whole files, repeat.
+- They **re-read the same context** on every turn of the loop.
+- They **paste raw tool output** (full file dumps, huge test logs) back into the prompt.
+- They **use one expensive model for everything**, including trivial steps like summarizing a log.
 
-    D --> E[Repo Atlas Lookup]
+The result is high cost and latency per task, and budgets that are hard to predict or cap.
 
-    subgraph RepoAtlas[Repo Atlas / Semantic Code Index]
-        F[Structural Index<br/>files, symbols, signatures]
-        G[Semantic Index<br/>LLM-generated titles and summaries]
-        H[Call Graph<br/>callers, callees, tests]
-    end
+## The Solution
 
-    E --> F
-    E --> G
-    E --> H
+BudgetDev attacks each source of waste:
 
-    E --> I[Return Symbol Pointers<br/>not full files]
+| Waste | BudgetDev's answer |
+|---|---|
+| Blind exploration | **Repo Atlas**: search code by meaning and get symbol pointers, not files |
+| Whole-file reads | **`read_lines`**: read only the relevant line window |
+| Raw tool output in context | **Compress** every observation before it enters the context |
+| One model for everything | **Model routing**: cheap model for planning/summarizing, stronger model only when needed |
+| Unbounded spend | **Budget Controller** with a hard token cap and a token receipt |
 
-    I --> J[Targeted Code Read<br/>read only relevant lines]
-    J --> K[Cheap Summarizer Model<br/>compress evidence and logs]
+## Status: What Works Today
 
-    K --> L{Enough evidence?}
-    L -- No --> E
-    L -- Yes --> M[Coder Model<br/>write minimal patch]
+This is a proof of concept. The core loop works end to end; the rest of the design is planned.
 
-    M --> N[Apply Patch]
-    N --> O[Run Targeted Tests]
-
-    O --> P{Tests pass?}
-    P -- Yes --> Q[Finish:<br/>return final patch + token receipt]
-    P -- No --> R{Budget remaining?}
-
-    R -- Yes --> S[Compress failure reason]
-    S --> T{Retry with cheap model?}
-    T -- Yes --> M
-    T -- No --> U[Escalate once to stronger model]
-    U --> M
-
-    R -- No --> V[Stop:<br/>report failure and token usage]
-```
-
-## Agent Loop
-
-The agent is a simple **Reason → Act → Observe** loop.
-
-```mermaid
-flowchart LR
-    A[Task + Tool Definitions] --> B[LLM Decision]
-    B --> C{Tool call or final answer?}
-
-    C -- Tool call --> D[Execute Python Tool]
-    D --> E[Compress Tool Output]
-    E --> F[Append Result to Context]
-    F --> B
-
-    C -- Final answer --> G[Return Patch]
-```
-
-The LLM decides **what to do**. Your Python code performs the actual work: searching the index, reading code, applying patches, and running tests.
-
-## Tools
-
-| Tool | Purpose | Token-Saving Role |
+| Component | Status | Notes |
 |---|---|---|
-| `semantic_search` | Find functions/classes by meaning | Avoids broad grep and file exploration |
-| `find_symbol` | Locate an exact function or class | Returns a precise pointer |
-| `get_call_graph` | Show callers, callees, and related tests | Avoids reading unrelated modules |
-| `read_lines` | Read a specific line window | Prevents whole-file reads |
-| `write_patch` | Apply a unified diff | Avoids rewriting entire files |
-| `run_tests` | Run selected tests | Avoids huge full-test logs |
-| `finish` | Submit the final patch | Ends the loop |
+| Agent loop (Reason → Act → Observe) | ✅ / 🔜 | TODO: confirm |
+| Repo Atlas: structural index | ✅ / 🔜 | TODO: AST parser or simpler approach? |
+| Repo Atlas: semantic summaries | ✅ / 🔜 | TODO |
+| Call graph (callers, callees, tests) | 🔜 | TODO |
+| Incremental index update after edits | 🔜 | TODO |
+| Tools: `semantic_search`, `read_lines`, `write_patch`, `run_tests`, `finish` | ✅ / 🔜 | TODO: list which exist |
+| Tools: `find_symbol`, `get_call_graph` | 🔜 | TODO |
+| Output compression | ✅ / 🔜 | TODO |
+| Model routing via Bifrost | ✅ / 🔜 | TODO |
+| Token budget + receipt | ✅ / 🔜 | TODO |
 
-## Repo Atlas
+## Quickstart
 
-The Repo Atlas is built once, then updated incrementally after edits.
+```bash
+git clone https://github.com/YazanDash/global-hackathon
+cd global-hackathon
+pip install -e .
+cp .env.example .env        # add your API keys
+# TODO: exact commands
+# python -m budgetdev index <path-to-repo>
+# python -m budgetdev fix <path-to-repo> "Login crashes when email is empty"
+```
+
+## How It Works
+
+### 1. Index once (Repo Atlas)
+
+The repository is parsed into functions, classes, imports, calls and tests. A cheap model writes a short title, summary and keywords for each symbol. Only changed symbols (and their direct callers/callees) are re-summarized after edits.
 
 ```mermaid
 flowchart TD
-    A[Repository] --> B[Tree-sitter / AST Parser]
+    A[Repository] --> B[Parser / AST]
     B --> C[Extract Functions, Classes, Imports, Calls, Tests]
     C --> D[Structural Index]
 
@@ -125,63 +98,97 @@ Example index entry:
 }
 ```
 
+### 2. Solve with a budgeted agent loop
+
+The agent is a **Reason → Act → Observe** loop. The LLM decides *what* to do; Python code does the work (searching the index, reading code, applying patches, running tests). Every tool output is compressed before it is appended to the context.
+
+```mermaid
+flowchart LR
+    A[Task + Tool Definitions] --> B[LLM Decision]
+    B --> C{Tool call or final answer?}
+
+    C -- Tool call --> D[Execute Python Tool]
+    D --> E[Compress Tool Output]
+    E --> F[Append Result to Context]
+    F --> B
+
+    C -- Final answer --> G[Return Patch]
+```
+
+### 3. Control the spend
+
+Around the loop, a Budget Controller decides which model handles each step and when to stop. This is the target pipeline:
+
+```mermaid
+flowchart TD
+    A[User Issue] --> B[Budget Controller]
+    B --> C[Cheap Planner Model:<br/>what evidence do we need?]
+    C --> D[Repo Atlas Lookup]
+    D --> E[Symbol Pointers, not files]
+    E --> F[read_lines: relevant window only]
+    F --> G[Cheap Model: compress evidence]
+    G --> H{Enough evidence?}
+    H -- No --> D
+    H -- Yes --> I[Coder Model: minimal patch]
+    I --> J[Apply Patch + Run Targeted Tests]
+    J --> K{Tests pass?}
+    K -- Yes --> L[Finish: patch + token receipt]
+    K -- No --> M{Budget left?}
+    M -- Yes --> N[Compress failure, retry<br/>escalate to stronger model once]
+    N --> I
+    M -- No --> O[Stop: report failure + token usage]
+```
+
+Before each action the controller asks: *Can the Atlas answer this without an LLM? Can a cheap model handle it? Do we need to read more? Should we run only targeted tests? Should we escalate? Is the budget exhausted?*
+
+## Tools
+
+| Tool | Purpose | Token-saving role |
+|---|---|---|
+| `semantic_search` | Find functions/classes by meaning | Replaces broad grep and file exploration |
+| `find_symbol` | Locate an exact function or class | Returns a precise pointer |
+| `get_call_graph` | Show callers, callees and related tests | Avoids reading unrelated modules |
+| `read_lines` | Read a specific line window | Prevents whole-file reads |
+| `write_patch` | Apply a unified diff | Avoids rewriting entire files |
+| `run_tests` | Run selected tests | Avoids huge full-test logs |
+| `finish` | Submit the final patch | Ends the loop |
+
 ## Model Routing
 
-BudgetDev uses Bifrost to route work to the cheapest model that can handle it.
+[Bifrost](https://github.com/maximhq/bifrost) is the single gateway for all model calls. It provides provider routing, virtual keys, budgets, rate limits, caching and a token ledger.
 
 ```mermaid
 flowchart TD
     A[Agent Action] --> B{Action type?}
-
     B -- Classify / Plan / Summarize --> C[Cheap Model]
     B -- Small localized patch --> D[Mid or Strong Coder Model]
     B -- Repeated failure / complex task --> E[Strong Escalation Model]
-
     C --> F[Bifrost Gateway]
     D --> F
     E --> F
-
     F --> G[Token Ledger + Observability]
 ```
 
-Bifrost provides a single gateway for multiple providers, virtual keys, budgets, rate limits, routing, caching, and observability.
+## Example Run
 
-## Token Budget Policy
-
-Before each action, the Budget Controller asks:
-
-1. Can the Repo Atlas answer this without an LLM?
-2. Can a cheap model handle it?
-3. Do we need to read more code?
-4. Should we run only targeted tests?
-5. Should we escalate to a stronger model?
-6. Should we stop because the budget is exhausted?
-
-The agent optimizes:
-
-\[
-	ext{Token Efficiency} = rac{	ext{Tasks successfully resolved}}{	ext{Total tokens used}}
-\]
-
-## Example Flow
-
-**Issue:** “Login crashes when email is empty.”
+**Issue:** "Login crashes when email is empty."
 
 ```mermaid
 sequenceDiagram
     participant U as User
     participant A as BudgetDev Agent
     participant R as Repo Atlas
+    participant F as File Reader
     participant L as LLM via Bifrost
     participant T as Test Runner
 
     U->>A: Fix empty-email login crash
-    A->>L: Plan task using cheap model
+    A->>L: Plan task (cheap model)
     L-->>A: Search for login validation
     A->>R: semantic_search("empty email login validation")
     R-->>A: auth/login.py::validate_login, lines 42-88
-    A->>R: read_lines("auth/login.py", 42, 88)
-    R-->>A: Relevant code only
+    A->>F: read_lines("auth/login.py", 42, 88)
+    F-->>A: Relevant code only
     A->>L: Generate minimal patch
     L-->>A: Unified diff
     A->>T: run_tests("test_login")
@@ -195,24 +202,36 @@ sequenceDiagram
 
 ## Evaluation
 
-Compare these configurations on the same tasks:
+We compare three configurations on the same tasks:
 
 | Configuration | Purpose |
 |---|---|
-| Baseline agent | Shows normal token consumption |
-| Baseline + Repo Atlas | Measures retrieval savings |
-| Baseline + Repo Atlas + Budget Controller | Measures full-system savings |
+| Baseline agent | Normal token consumption |
+| Baseline + Repo Atlas | Retrieval savings |
+| Baseline + Repo Atlas + Budget Controller | Full-system savings |
 
-Track:
+Metric:
 
-- Total input and output tokens
-- Number of LLM calls
-- Number of files read
-- Number of tests run
-- Patch correctness / tests passed
-- Cost and wall time
-- Tokens per successfully resolved task
+$$
+\text{Tokens per resolved task} = \frac{\text{Total tokens used}}{\text{Tasks successfully resolved}}
+$$
 
-## Demo Message
+We also track input/output tokens, LLM calls, files read, tests run, pass rate, cost and wall time.
 
-> BudgetDev plans before it reads, retrieves only the code it needs through a semantic Repo Atlas, compresses everything it observes, and routes work through Bifrost so tokens are spent only where they change the outcome.
+### Results
+
+| Configuration | Tasks | Resolved | Total tokens | Tokens / resolved task | LLM calls |
+|---|---|---|---|---|---|
+| Baseline | TODO | TODO | TODO | TODO | TODO |
+| + Repo Atlas | TODO | TODO | TODO | TODO | TODO |
+| + Atlas + Budget Controller | TODO | TODO | TODO | TODO | TODO |
+
+*Even a small run (3–5 tasks on one repo) is enough for a POC. Report the one-time indexing cost separately.*
+
+## Limitations and Next Steps
+
+- **Indexing has an upfront cost.** It pays off only across multiple tasks on the same repo.
+- **Summaries can be wrong or stale.** A bad summary can hide the right function. Incremental re-indexing and a fallback to plain text search are needed.
+- **Static call graphs miss dynamic behavior** (dynamic dispatch, reflection, runtime registration).
+- **Tests are required.** Without tests, the agent has no signal for "correct".
+- Next: full call graph, incremental updates, multi-language support, larger
